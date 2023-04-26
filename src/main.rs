@@ -7,7 +7,6 @@ use std::{
     fs::{copy, OpenOptions},
     io::Write,
     net::SocketAddr,
-    path::PathBuf,
     process::{exit, Stdio},
 };
 use sync_bcast::*;
@@ -50,16 +49,10 @@ async fn exec_args(caster: Caster) {
 
 async fn exec_cmd(cmd: Pup, results: Caster) {
     let res = match cmd.cmd {
-        Command::Write { mode, data, path } => write(mode, path, data).map(|()| Res::Write {}),
-        Command::Copy { from, to } => copy(from, to).map(|_| Res::Copy {}),
-        Command::Exec {
-            exe,
-            env,
-            argv,
-            arg0,
-            wd,
-        } => exec(cmd.id.clone(), exe, env, argv, arg0, wd, results.clone()).map(|()| Res::Exec {}),
-        Command::Listen { addr } => listen(addr, results.clone())
+        Command::Write(data) => write(data).map(|()| Res::Write {}),
+        Command::Copy(CopyCmd { from, to }) => copy(from, to).map(|_| Res::Copy {}),
+        Command::Exec(data) => exec(cmd.id.clone(), data, results.clone()).map(|()| Res::Exec {}),
+        Command::Listen(data) => listen(data, results.clone())
             .await
             .map(|addr| Res::Listen { addr }),
     };
@@ -75,7 +68,10 @@ async fn exec_cmd(cmd: Pup, results: Caster) {
     results.send(res).await;
 }
 
-async fn listen(addr: std::net::SocketAddr, results: Caster) -> Result<SocketAddr, std::io::Error> {
+async fn listen(
+    ListenCmd { addr }: ListenCmd,
+    results: Caster,
+) -> Result<SocketAddr, std::io::Error> {
     let server = TcpListener::bind(addr).await?;
     let addr = server.local_addr()?;
     let server = TcpListenerStream::new(server)
@@ -147,11 +143,13 @@ fn read_commands(read: tokio::net::tcp::OwnedReadHalf, results: Caster, addr: Op
 
 fn exec(
     id: String,
-    exe: PathBuf,
-    env: Vec<(String, String)>,
-    argv: Vec<String>,
-    arg0: Option<String>,
-    wd: Option<PathBuf>,
+    ExecCmd {
+        exe,
+        env,
+        argv,
+        arg0,
+        wd,
+    }: ExecCmd,
     results: Caster,
 ) -> Result<(), std::io::Error> {
     let cmd = &mut tokio::process::Command::new(exe);
@@ -210,7 +208,7 @@ async fn bcast_out(id: String, stdout: impl AsyncRead + Unpin, out_pipe: OutPipe
     }
 }
 
-fn write(mode: WriteMode, path: std::path::PathBuf, data: Vec<u8>) -> Result<(), std::io::Error> {
+fn write(WriteCmd { mode, path, data }: WriteCmd) -> Result<(), std::io::Error> {
     OpenOptions::new()
         .write(true)
         .append(match mode {
