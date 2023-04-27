@@ -225,6 +225,7 @@ fn write(WriteCmd { mode, path, data }: &WriteCmd) -> Result<(), String> {
         create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {e}"))?;
     }
     OpenOptions::new()
+        .create(true)
         .write(true)
         .append(match mode {
             WriteMode::Append => true,
