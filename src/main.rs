@@ -4,7 +4,7 @@ use futures_util::{FutureExt, StreamExt, TryStreamExt};
 use log::{error, info};
 use std::{
     env::args,
-    fs::{copy, OpenOptions},
+    fs::{copy, create_dir_all, OpenOptions},
     io::Write,
     net::SocketAddr,
     process::{exit, Stdio},
@@ -209,6 +209,9 @@ async fn bcast_out(id: String, stdout: impl AsyncRead + Unpin, out_pipe: OutPipe
 }
 
 fn write(WriteCmd { mode, path, data }: WriteCmd) -> Result<(), std::io::Error> {
+    if let Some(parent) = path.parent() {
+        create_dir_all(parent)?;
+    }
     OpenOptions::new()
         .write(true)
         .append(match mode {
