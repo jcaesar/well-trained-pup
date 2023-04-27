@@ -48,28 +48,40 @@ async fn exec_args(caster: Caster) {
 }
 
 async fn exec_cmd(cmd: Pup, results: Caster) {
-    let res = match cmd.cmd {
-        Command::Write(data) => write(data).map(|()| Res::Write {}),
-        Command::Copy(CopyCmd { from, to }) => copy(from, to).map(|_| Res::Copy {}),
-        Command::Exec(data) => exec(cmd.id.clone(), data, results.clone()).map(|()| Res::Exec {}),
-        Command::Listen(data) => listen(data, results.clone())
-            .await
-            .map(|addr| Res::Listen { addr }),
+    let res = match &cmd.cmd {
+        Command::Write(data) => match write(&data) {
+            Ok(()) => Ok(Res::Write {}),
+            Err(e) => Err(format!("Failed to write to {}: {}", data.path.display(), e)),
+        },
+        Command::Copy(CopyCmd { from, to }) => match copy(from, to) {
+            Ok(_) => Ok(Res::Copy {}),
+            Err(e) => Err(format!(
+                "Failed to copy {} to {}: {e}",
+                from.display(),
+                to.display()
+            )),
+        },
+        Command::Exec(data) => match exec(cmd.id.clone(), data, results.clone()) {
+            Ok(()) => Ok(Res::Exec {}),
+            Err(e) => Err(format!("failed to launch {}: {e}", data.exe.display())),
+        },
+        Command::Listen(data) => match listen(data, results.clone()).await {
+            Ok(addr) => Ok(Res::Listen { addr }),
+            Err(e) => Err(format!("Failed to listen on {}: {e}", data.addr)),
+        },
     };
     let res = match res {
         Ok(res) => Resp { res, id: cmd.id },
-        Err(err) => Resp {
+        Err(msg) => Resp {
             id: cmd.id,
-            res: Res::Error {
-                msg: err.to_string(),
-            },
+            res: Res::Error { msg },
         },
     };
     results.send(res).await;
 }
 
 async fn listen(
-    ListenCmd { addr }: ListenCmd,
+    ListenCmd { addr }: &ListenCmd,
     results: Caster,
 ) -> Result<SocketAddr, std::io::Error> {
     let server = TcpListener::bind(addr).await?;
@@ -149,12 +161,12 @@ fn exec(
         argv,
         arg0,
         wd,
-    }: ExecCmd,
+    }: &ExecCmd,
     results: Caster,
 ) -> Result<(), std::io::Error> {
     let cmd = &mut tokio::process::Command::new(exe);
     cmd.args(argv)
-        .envs(env)
+        .envs(env.iter().cloned())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -208,9 +220,9 @@ async fn bcast_out(id: String, stdout: impl AsyncRead + Unpin, out_pipe: OutPipe
     }
 }
 
-fn write(WriteCmd { mode, path, data }: WriteCmd) -> Result<(), std::io::Error> {
+fn write(WriteCmd { mode, path, data }: &WriteCmd) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        create_dir_all(parent)?;
+        create_dir_all(parent).map_err(|e| format!("Failed to create parent dir: {e}"))?;
     }
     OpenOptions::new()
         .write(true)
@@ -218,6 +230,9 @@ fn write(WriteCmd { mode, path, data }: WriteCmd) -> Result<(), std::io::Error> 
             WriteMode::Append => true,
             WriteMode::Replace => false,
         })
-        .open(path)?
+        .open(path)
+        .map_err(|e| format!("Failed to open file: {e}"))?
         .write_all(&data)
+        .map_err(|e| format!("Failed to write data: {e}"))?;
+    Ok(())
 }
