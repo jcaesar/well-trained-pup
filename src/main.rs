@@ -146,9 +146,9 @@ fn read_commands(
     format: Format,
 ) {
     tokio::spawn(async move {
+        let read = BufReader::new(read);
         match format {
             Format::JSONL => {
-                let read = BufReader::new(read);
                 let mut read = read.lines();
                 while let Some(msg) = read.next_line().await.ok().flatten() {
                     match serde_json::from_str::<Pup>(&msg) {
