@@ -38,7 +38,7 @@ structstruck::strike! {
                     #![derive(Default, Copy, Clone)]
                     #[default]
                     JSONL,
-                    CBOR,
+                    MSGPACK,
                 }
             }),
         }

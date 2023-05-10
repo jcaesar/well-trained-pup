@@ -8,10 +8,10 @@ name = "pup"
 path = "src/main.rs"
 
 [dependencies]
-ciborium = "0.2.1"
 env_logger = "0.10.0"
 futures-util = "0.3.28"
 log = { version = "0.4.17", features = ["serde", "std"] }
+rmp-serde = "1.1.1"
 serde = { version = "1.0.160", features = ["derive"] }
 serde_json = "1.0.96"
 structstruck = "0.4.1"

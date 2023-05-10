@@ -2,6 +2,7 @@ mod sync_bcast;
 
 use futures_util::{FutureExt, StreamExt, TryStreamExt};
 use log::{error, info};
+use serde::Deserialize;
 use std::{
     env::args,
     fs::{copy, create_dir_all, OpenOptions},
@@ -13,7 +14,6 @@ use sync_bcast::*;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, BufWriter},
     net::TcpListener,
-    sync::mpsc::channel,
 };
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::io::SyncIoBridge;
@@ -160,30 +160,28 @@ fn read_commands(
                     }
                 }
             }
-            Format::CBOR => {
-                let (p, mut g) = channel(3);
+            Format::MSGPACK => {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::spawn_blocking(move || {
-                    let mut read = SyncIoBridge::new_with_handle(read, handle.clone());
+                    let read = SyncIoBridge::new_with_handle(read, handle.clone());
+                    let mut read = rmp_serde::decode::Deserializer::new(read);
                     loop {
-                        let msg = ciborium::from_reader::<Pup, _>(&mut read);
-                        match msg {
-                            Err(ciborium::de::Error::Io(io))
-                                if io.kind() == ErrorKind::UnexpectedEof =>
+                        match Pup::deserialize(&mut read) {
+                            Err(rmp_serde::decode::Error::InvalidMarkerRead(e))
+                                if e.kind() == ErrorKind::UnexpectedEof =>
                             {
-                                break
+                                break;
                             }
                             Err(err) => {
                                 error!("I bite {addr:?}: {err:?}");
                                 break;
                             }
-                            Ok(msg) => handle.block_on(p.send(msg)).expect("Channel broke"),
+                            Ok(msg) => handle.block_on(Box::pin(exec_cmd(msg, results.clone()))),
                         }
                     }
-                });
-                while let Some(cmd) = g.recv().await {
-                    Box::pin(exec_cmd(cmd, results.clone())).await;
-                }
+                })
+                .await
+                .unwrap();
             }
         }
         log::info!("{addr:?} closes input");
