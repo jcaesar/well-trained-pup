@@ -2,7 +2,7 @@ mod sync_bcast;
 
 use futures_util::{FutureExt, StreamExt, TryStreamExt};
 use log::{error, info};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     env::args,
     fs::{copy, create_dir_all, OpenOptions},
@@ -151,7 +151,7 @@ async fn listen(
                 info!("new connection from {:?}", addr);
                 let (read, write) = client_conn.into_split();
                 let (results_private, results_out) = results.subscribe_sidechannel().await;
-                write_results(write, results_out, addr.as_ref().ok().cloned());
+                write_results(write, results_out, addr.as_ref().ok().cloned(), format);
                 read_commands(read, results, results_private, addr.ok(), format);
                 Ok(())
             }
@@ -168,15 +168,27 @@ fn write_results(
     mut write: tokio::net::tcp::OwnedWriteHalf,
     mut subscribe: tokio::sync::mpsc::Receiver<Resp>,
     clone: Option<SocketAddr>,
+    format: Format,
 ) {
     tokio::spawn(
         async move {
             let mut write = BufWriter::new(&mut write);
             while let Some(res) = subscribe.recv().await {
-                write
-                    .write_all(&serde_json::to_vec(&res).expect("Res always serializable"))
-                    .await?;
-                write.write_all(b"\n").await?;
+                match format {
+                    Format::JSONL => {
+                        write
+                            .write_all(&serde_json::to_vec(&res).expect("Res always serializable"))
+                            .await?;
+                        write.write_all(b"\n").await?;
+                    }
+                    Format::MSGPACK => {
+                        let mut data = vec![];
+                        let mut ser =
+                            rmp_serde::encode::Serializer::new(&mut data).with_struct_map();
+                        res.serialize(&mut ser).expect("Puppy serialize");
+                        write.write_all(&data).await?;
+                    }
+                }
                 write.flush().await?;
             }
             Ok::<_, std::io::Error>(())
