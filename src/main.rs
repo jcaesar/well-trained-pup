@@ -5,7 +5,7 @@ use log::{error, info};
 use std::{
     env::args,
     fs::{copy, create_dir_all, OpenOptions},
-    io::Write,
+    io::{ErrorKind, Write},
     net::SocketAddr,
     process::{exit, Stdio},
 };
@@ -13,8 +13,10 @@ use sync_bcast::*;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, BufWriter},
     net::TcpListener,
+    sync::mpsc::channel,
 };
 use tokio_stream::wrappers::TcpListenerStream;
+use tokio_util::io::SyncIoBridge;
 use well_trained_pup::*;
 
 #[tokio::main(flavor = "current_thread")]
@@ -81,11 +83,12 @@ async fn exec_cmd(cmd: Pup, results: Caster) {
 }
 
 async fn listen(
-    ListenCmd { addr }: &ListenCmd,
+    ListenCmd { addr, format }: &ListenCmd,
     results: Caster,
 ) -> Result<SocketAddr, std::io::Error> {
     let server = TcpListener::bind(addr).await?;
     let addr = server.local_addr()?;
+    let &format = format;
     let server = TcpListenerStream::new(server)
         .take_until(tokio::signal::ctrl_c())
         .try_for_each(move |client_conn| {
@@ -99,7 +102,7 @@ async fn listen(
                     results.subscribe().await,
                     addr.as_ref().ok().cloned(),
                 );
-                read_commands(read, results, addr.ok());
+                read_commands(read, results, addr.ok(), format);
                 Ok(())
             }
         });
@@ -136,16 +139,50 @@ fn write_results(
     );
 }
 
-fn read_commands(read: tokio::net::tcp::OwnedReadHalf, results: Caster, addr: Option<SocketAddr>) {
+fn read_commands(
+    read: tokio::net::tcp::OwnedReadHalf,
+    results: Caster,
+    addr: Option<SocketAddr>,
+    format: Format,
+) {
     tokio::spawn(async move {
-        let stout = BufReader::new(read);
-        let mut stdout = stout.lines();
-        while let Some(msg) = stdout.next_line().await.ok().flatten() {
-            match serde_json::from_str::<Pup>(&msg) {
-                Ok(cmd) => Box::pin(exec_cmd(cmd, results.clone())).await,
-                Err(err) => {
-                    error!("I bite {addr:?} for {msg:?}: {err}");
-                    break;
+        match format {
+            Format::JSONL => {
+                let read = BufReader::new(read);
+                let mut read = read.lines();
+                while let Some(msg) = read.next_line().await.ok().flatten() {
+                    match serde_json::from_str::<Pup>(&msg) {
+                        Ok(cmd) => Box::pin(exec_cmd(cmd, results.clone())).await,
+                        Err(err) => {
+                            error!("I bite {addr:?} for {msg:?}: {err:?}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Format::CBOR => {
+                let (p, mut g) = channel(3);
+                let handle = tokio::runtime::Handle::current();
+                tokio::task::spawn_blocking(move || {
+                    let mut read = SyncIoBridge::new_with_handle(read, handle.clone());
+                    loop {
+                        let msg = ciborium::from_reader::<Pup, _>(&mut read);
+                        match msg {
+                            Err(ciborium::de::Error::Io(io))
+                                if io.kind() == ErrorKind::UnexpectedEof =>
+                            {
+                                break
+                            }
+                            Err(err) => {
+                                error!("I bite {addr:?}: {err:?}");
+                                break;
+                            }
+                            Ok(msg) => handle.block_on(p.send(msg)).expect("Channel broke"),
+                        }
+                    }
+                });
+                while let Some(cmd) = g.recv().await {
+                    Box::pin(exec_cmd(cmd, results.clone())).await;
                 }
             }
         }

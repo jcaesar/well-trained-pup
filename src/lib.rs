@@ -33,6 +33,13 @@ structstruck::strike! {
             }),
             Listen(pub struct ListenCmd{
                 pub addr: SocketAddr,
+                #[serde(default)]
+                pub format: enum {
+                    #![derive(Default, Copy, Clone)]
+                    #[default]
+                    JSONL,
+                    CBOR,
+                }
             }),
         }
     }
