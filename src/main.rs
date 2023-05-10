@@ -12,8 +12,9 @@ use std::{
 };
 use sync_bcast::*;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::TcpListener,
+    sync::mpsc,
 };
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::io::SyncIoBridge;
@@ -39,9 +40,15 @@ async fn main() {
 
 async fn exec_args(caster: Caster) {
     let args = args().collect::<Vec<_>>();
+    let (backchannel, mut print) = mpsc::channel(3);
+    tokio::spawn(async move {
+        while let Some(print) = print.recv().await {
+            info!("Bork: {print:?}");
+        }
+    });
     for arg in args.iter().skip(1) {
         match serde_json::from_str::<Pup>(&arg) {
-            Ok(cmd) => exec_cmd(cmd, caster.clone()).await,
+            Ok(cmd) => exec_cmd(cmd, caster.clone(), backchannel.clone()).await,
             Err(err) => {
                 error!("{arg:?} is not for puppies: {err}");
             }
@@ -49,12 +56,33 @@ async fn exec_args(caster: Caster) {
     }
 }
 
-async fn exec_cmd(cmd: Pup, results: Caster) {
+async fn exec_cmd(cmd: Pup, results: Caster, direct_backchannel: mpsc::Sender<Resp>) {
     let res = match &cmd.cmd {
         Command::Write(data) => match write(&data) {
             Ok(()) => Ok(Res::Write {}),
             Err(e) => Err(format!("Failed to write to {}: {}", data.path.display(), e)),
         },
+        Command::Read(data) => {
+            let bc = |res| {
+                direct_backchannel
+                    .send(Resp {
+                        res,
+                        id: cmd.id.clone(),
+                    })
+                    .map(|_| ())
+            };
+            let path = data
+                .path
+                .canonicalize()
+                .as_ref()
+                .unwrap_or(&data.path)
+                .display()
+                .to_string();
+            match read(&data, bc).await {
+                Ok(()) => Ok(Res::Read { path }),
+                Err(e) => Err(format!("Failed to read {}: {}", data.path.display(), e)),
+            }
+        }
         Command::Copy(CopyCmd { from, to }) => match copy(from, to) {
             Ok(_) => Ok(Res::Copy {}),
             Err(e) => Err(format!(
@@ -82,6 +110,31 @@ async fn exec_cmd(cmd: Pup, results: Caster) {
     results.send(res).await;
 }
 
+async fn read<BSR: std::future::Future<Output = ()>>(
+    ReadCmd { path, chunk_size }: &ReadCmd,
+    direct_backchannel: impl Fn(Res) -> BSR,
+) -> Result<(), std::io::Error> {
+    let file = tokio::fs::File::open(path).await?;
+    let file = &mut BufReader::new(file);
+    let mut offset = 0;
+    let chunk_size = chunk_size.unwrap_or(1 << 22);
+    loop {
+        let mut data = Vec::with_capacity(chunk_size as usize);
+        let n = file.take(chunk_size).read_to_end(&mut data).await?;
+        direct_backchannel(Res::ReadChunk {
+            data,
+            offset,
+            more: n > 0,
+        })
+        .await;
+        offset += n as u64;
+        if n == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
 async fn listen(
     ListenCmd { addr, format }: &ListenCmd,
     results: Caster,
@@ -97,12 +150,9 @@ async fn listen(
                 let addr = client_conn.peer_addr();
                 info!("new connection from {:?}", addr);
                 let (read, write) = client_conn.into_split();
-                write_results(
-                    write,
-                    results.subscribe().await,
-                    addr.as_ref().ok().cloned(),
-                );
-                read_commands(read, results, addr.ok(), format);
+                let (results_private, results_out) = results.subscribe_sidechannel().await;
+                write_results(write, results_out, addr.as_ref().ok().cloned());
+                read_commands(read, results, results_private, addr.ok(), format);
                 Ok(())
             }
         });
@@ -142,6 +192,7 @@ fn write_results(
 fn read_commands(
     read: tokio::net::tcp::OwnedReadHalf,
     results: Caster,
+    results_private: mpsc::Sender<Resp>,
     addr: Option<SocketAddr>,
     format: Format,
 ) {
@@ -152,7 +203,9 @@ fn read_commands(
                 let mut read = read.lines();
                 while let Some(msg) = read.next_line().await.ok().flatten() {
                     match serde_json::from_str::<Pup>(&msg) {
-                        Ok(cmd) => Box::pin(exec_cmd(cmd, results.clone())).await,
+                        Ok(cmd) => {
+                            Box::pin(exec_cmd(cmd, results.clone(), results_private.clone())).await
+                        }
                         Err(err) => {
                             error!("I bite {addr:?} for {msg:?}: {err:?}");
                             break;
@@ -176,7 +229,11 @@ fn read_commands(
                                 error!("I bite {addr:?}: {err:?}");
                                 break;
                             }
-                            Ok(msg) => handle.block_on(Box::pin(exec_cmd(msg, results.clone()))),
+                            Ok(msg) => handle.block_on(Box::pin(exec_cmd(
+                                msg,
+                                results.clone(),
+                                results_private.clone(),
+                            ))),
                         }
                     }
                 })

@@ -24,6 +24,12 @@ impl Caster {
         receivers.push(w);
         r
     }
+    pub async fn subscribe_sidechannel(&self) -> (Sender<Resp>, Receiver<Resp>) {
+        let (w, r) = channel(self.capacity);
+        let mut receivers = self.receivers.lock().await;
+        receivers.push(w.clone());
+        (w, r)
+    }
     pub async fn send(&self, msg: Resp) {
         let mut receivers = self.receivers.lock().await;
         let mut retain = Vec::with_capacity(receivers.len());

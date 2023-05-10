@@ -18,6 +18,10 @@ structstruck::strike! {
                 pub data: Vec<u8>,
                 pub path: PathBuf,
             }),
+            Read(pub struct ReadCmd {
+                pub path: PathBuf,
+                pub chunk_size: Option<u64>,
+            }),
             Copy(pub struct CopyCmd {
                 pub from: PathBuf,
                 pub to: PathBuf,
@@ -50,6 +54,11 @@ impl From<WriteCmd> for Command {
         Self::Write(value)
     }
 }
+impl From<ReadCmd> for Command {
+    fn from(value: ReadCmd) -> Self {
+        Self::Read(value)
+    }
+}
 impl From<CopyCmd> for Command {
     fn from(value: CopyCmd) -> Self {
         Self::Copy(value)
@@ -75,6 +84,12 @@ structstruck::strike! {
             Write {},
             Copy {},
             Exec {},
+            Read { path: String },
+            ReadChunk { // Not broadcasted
+                data: Vec<u8>,
+                offset: u64,
+                more: bool
+            },
             Listen { addr: SocketAddr },
             Exit { code: Option<i32> },
             Output {
