@@ -9,6 +9,7 @@ use std::{
     io::{ErrorKind, Write},
     net::SocketAddr,
     process::{exit, Stdio},
+    time::Duration,
 };
 use sync_bcast::*;
 use tokio::{
@@ -99,6 +100,7 @@ async fn exec_cmd(cmd: Pup, results: Caster, direct_backchannel: mpsc::Sender<Re
             Ok(addr) => Ok(Res::Listen { addr }),
             Err(e) => Err(format!("Failed to listen on {}: {e}", data.addr)),
         },
+        Command::Heartbeat(data) => return heartbeat(cmd.id.clone(), data, results),
     };
     let res = match res {
         Ok(res) => Resp { res, id: cmd.id },
@@ -108,6 +110,20 @@ async fn exec_cmd(cmd: Pup, results: Caster, direct_backchannel: mpsc::Sender<Re
         },
     };
     results.send(res).await;
+}
+
+fn heartbeat(id: String, HeartbeatCmd { interval_secs }: &HeartbeatCmd, results: Caster) {
+    let mut interval = tokio::time::interval(Duration::from_secs_f32(*interval_secs));
+    tokio::spawn(async move {
+        for i in 0.. {
+            interval.tick().await;
+            let msg = Resp {
+                id: id.clone(),
+                res: Res::Heartbeat { i },
+            };
+            results.send(msg).await;
+        }
+    });
 }
 
 async fn read<BSR: std::future::Future<Output = ()>>(

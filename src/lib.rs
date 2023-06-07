@@ -35,7 +35,7 @@ structstruck::strike! {
                 pub arg0: Option<String>,
                 pub wd: Option<PathBuf>,
             }),
-            Listen(pub struct ListenCmd{
+            Listen(pub struct ListenCmd {
                 pub addr: SocketAddr,
                 #[serde(default)]
                 pub format: enum {
@@ -44,6 +44,9 @@ structstruck::strike! {
                     JSONL,
                     MSGPACK,
                 }
+            }),
+            Heartbeat(pub struct HeartbeatCmd {
+                pub interval_secs: f32,
             }),
         }
     }
@@ -74,6 +77,11 @@ impl From<ListenCmd> for Command {
         Self::Listen(value)
     }
 }
+impl From<HeartbeatCmd> for Command {
+    fn from(value: HeartbeatCmd) -> Self {
+        Self::Heartbeat(value)
+    }
+}
 
 structstruck::strike! {
     #[strikethrough[derive(Debug, Serialize, Deserialize, Clone)]]
@@ -100,6 +108,7 @@ structstruck::strike! {
                 },
                 msg: String
             },
+            Heartbeat { i: u64 },
             Error { msg: String },
         }
     }
